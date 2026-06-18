@@ -46,6 +46,7 @@ demands_array = np.maximum(0, np.random.normal(mean_demand, std_demand, sim_days
 arr_opening_balance = np.zeros(sim_days, dtype=int)
 arr_opening_backlog = np.zeros(sim_days, dtype=int)
 arr_orders_fulfilled = np.zeros(sim_days, dtype=int)
+arr_unfulfilled_demand = np.zeros(sim_days, dtype=int) # NEW METRIC: Today's unfulfilled demand
 arr_backlog_cf = np.zeros(sim_days, dtype=int)
 arr_closing_balance = np.zeros(sim_days, dtype=int)
 arr_pipeline_orders = np.zeros(sim_days, dtype=int)
@@ -63,6 +64,7 @@ total_fulfilled_on_time = 0
 for i in range(sim_days):
     day = i + 1
     daily_fulfilled = 0
+    daily_unfulfilled_new = 0 # Track today's new misses
     
     # --- MORNING OPERATIONS ---
     arrived_qty = sum([o['qty'] for o in pending_supplier_orders if o['arrival_day'] == day])
@@ -107,16 +109,19 @@ for i in range(sim_days):
         elif inventory > 0:
             daily_fulfilled += inventory
             total_fulfilled_on_time += inventory
+            daily_unfulfilled_new = today_order['qty'] - inventory # Missed portion
             today_order['qty'] -= inventory
             inventory = 0
             customer_queue.append(today_order)
         else:
+            daily_unfulfilled_new = today_order['qty'] # Entirely missed
             customer_queue.append(today_order)
             
     # --- END OF DAY METRICS & REVIEW ---
     arr_closing_balance[i] = inventory
     arr_backlog_cf[i] = sum(o['qty'] for o in customer_queue)
     arr_orders_fulfilled[i] = daily_fulfilled
+    arr_unfulfilled_demand[i] = daily_unfulfilled_new
     
     # True Stockout Check
     past_due_orders = [o for o in customer_queue if day > o['due_day']]
@@ -148,12 +153,13 @@ df = pd.DataFrame({
     'Opening Backlog Orders': arr_opening_backlog,
     'Demand': demands_array,
     'Orders Fulfilled': arr_orders_fulfilled,
+    'Unfulfilled Orders (Today)': arr_unfulfilled_demand, # NEW COLUMN
     'Backlogs to Carry Forward': arr_backlog_cf,
     'Closing Balance': arr_closing_balance,
     'Pipeline Orders': arr_pipeline_orders,
     'Stockout Day': arr_stockout_day,
     'Inventory Position': arr_inv_position,
-    'Net Inventory': arr_closing_balance - arr_backlog_cf  # Requested metric (Can go negative)
+    'Net Inventory': arr_closing_balance - arr_backlog_cf
 })
 
 # ==========================================
@@ -201,12 +207,10 @@ st.markdown("---")
 st.subheader("📉 Net Inventory Over Time (Closing Inventory - Backlog)")
 st.markdown("Positive values reflect available shelf stock. Negative values show explicit unfulfilled order deficits.")
 
-# New Line Chart for Net Inventory (Allows Negative values)
 fig2 = px.line(df, x='Day', y='Net Inventory', 
               labels={'Net Inventory': 'Net Units'},
-              color_discrete_sequence=['#9467bd']) # Distinct Purple Color
+              color_discrete_sequence=['#9467bd']) 
 
-# Add a flat baseline at 0 for visual clarity
 fig2.add_hline(y=0, line_dash="solid", line_color="black", opacity=0.4)
 st.plotly_chart(fig2, use_container_width=True)
 
@@ -226,12 +230,14 @@ st.markdown("---")
 st.subheader("📋 Daily Inventory Ledger")
 st.markdown("Detailed breakdown tracking Opening, Closing, and Pipeline balances.")
 
+# Updated columns list to include the newly requested metric
 ledger_cols = [
     'Day', 
     'Opening Balance', 
     'Opening Backlog Orders', 
     'Demand', 
     'Orders Fulfilled', 
+    'Unfulfilled Orders (Today)', 
     'Backlogs to Carry Forward', 
     'Closing Balance', 
     'Pipeline Orders'
