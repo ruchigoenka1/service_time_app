@@ -130,15 +130,16 @@ for i in range(sim_days):
     arr_orders_fulfilled[i] = daily_fulfilled
     arr_unfulfilled_demand[i] = daily_unfulfilled_new
     
-    # True Stockout Check & Lost Sales Execution
-    past_due_orders = [o for o in customer_queue if day > o['due_day']]
+    # --- CORRECTED STOCKOUT LOGIC ---
+    # An order is now flagged as a stockout if it is still in the queue on the evening of its due date
+    past_due_orders = [o for o in customer_queue if day >= o['due_day']]
     arr_stockout_day[i] = 1 if len(past_due_orders) > 0 else 0
     
     daily_lost_sales = 0
     if cancel_expired and len(past_due_orders) > 0:
         daily_lost_sales = sum(o['qty'] for o in past_due_orders)
-        # Drop the expired orders from the active queue
-        customer_queue = [o for o in customer_queue if day <= o['due_day']]
+        # Drop the expired orders (keep only those whose due date is STRICTLY greater than today)
+        customer_queue = [o for o in customer_queue if day < o['due_day']]
         
     arr_lost_sales[i] = daily_lost_sales
     
@@ -246,7 +247,6 @@ fig3 = px.area(df, x='Day', y='Backlogs to Carry Forward',
                labels={'Backlogs to Carry Forward': 'Units'},
                color_discrete_sequence=['#d62728']) 
 
-# Safely rename the area trace for the legend
 fig3.update_traces(name='Active Backlog', showlegend=True)
 
 if df['Lost Sales (Cancelled)'].sum() > 0:
