@@ -10,7 +10,7 @@ st.markdown("""
 This app simulates a continuous review **(Q, R)** inventory system with backlog allowances.
 * **Morning:** Incoming shipments arrive. Existing backlogs are cleared first.
 * **Daytime:** New demand occurs and is filled. Unfilled demand moves to the backlog.
-* **Evening:** Inventory position is evaluated. If below ROP, a new order is placed to arrive in **$LT + 1$** days.
+* **Evening:** Depending on your policy, expired backlogs are either carried forward or cancelled as Lost Sales. Inventory position is evaluated for reordering.
 """)
 
 # ==========================================
@@ -25,8 +25,16 @@ std_demand = st.sidebar.number_input("Demand Variation (Std Dev)", min_value=0, 
 st.sidebar.subheader("Time Metrics (Days)")
 supplier_lead_time = st.sidebar.number_input("Supplier Lead Time (LT)", min_value=1, value=14, 
                                              help="Orders placed evening of Day T arrive morning of Day T + LT + 1")
-service_time = st.sidebar.number_input("Service Time (Backlog Allowance)", min_value=0, value=3, 
-                                       help="Days an order can be carried before it becomes a stockout.")
+service_time = st.sidebar.number_input("Service Time (Backlog Allowance)", min_value=0, value=2, 
+                                       help="Days an order can sit in the backlog before the timer expires.")
+
+st.sidebar.subheader("Backlog Policy")
+backlog_policy = st.sidebar.radio(
+    "What happens when Service Time expires?",
+    options=["Carry Forward (Keep trying to fill)", "Cancel Order (Lost Sale)"],
+    help="Determines if expired orders sit in the queue forever, or get deleted as a Lost Sale."
+)
+cancel_expired = (backlog_policy == "Cancel Order (Lost Sale)")
 
 st.sidebar.subheader("Inventory Policy")
 rop = st.sidebar.number_input("Reorder Point (ROP)", min_value=0, value=800)
@@ -46,7 +54,8 @@ demands_array = np.maximum(0, np.random.normal(mean_demand, std_demand, sim_days
 arr_opening_balance = np.zeros(sim_days, dtype=int)
 arr_opening_backlog = np.zeros(sim_days, dtype=int)
 arr_orders_fulfilled = np.zeros(sim_days, dtype=int)
-arr_unfulfilled_demand = np.zeros(sim_days, dtype=int) # NEW METRIC: Today's unfulfilled demand
+arr_unfulfilled_demand = np.zeros(sim_days, dtype=int)
+arr_lost_sales = np.zeros(sim_days, dtype=int) # NEW: Tracks cancelled orders
 arr_backlog_cf = np.zeros(sim_days, dtype=int)
 arr_closing_balance = np.zeros(sim_days, dtype=int)
 arr_pipeline_orders = np.zeros(sim_days, dtype=int)
@@ -55,8 +64,8 @@ arr_inv_position = np.zeros(sim_days, dtype=int)
 
 # Initialize Starting State
 inventory = rop + order_qty
-pending_supplier_orders = [] # [{'ordered_day': int, 'arrival_day': int, 'qty': int}]
-customer_queue = []          # [{'order_day': int, 'due_day': int, 'qty': int}]
+pending_supplier_orders = [] 
+customer_queue = []          
 
 total_demand_generated = np.sum(demands_array)
 total_fulfilled_on_time = 0
@@ -64,14 +73,13 @@ total_fulfilled_on_time = 0
 for i in range(sim_days):
     day = i + 1
     daily_fulfilled = 0
-    daily_unfulfilled_new = 0 # Track today's new misses
+    daily_unfulfilled_new = 0 
     
     # --- MORNING OPERATIONS ---
     arrived_qty = sum([o['qty'] for o in pending_supplier_orders if o['arrival_day'] == day])
     inventory += arrived_qty
     pending_supplier_orders = [o for o in pending_supplier_orders if o['arrival_day'] > day]
     
-    # Record Opening Balances
     arr_opening_balance[i] = inventory
     arr_opening_backlog[i] = sum([o['qty'] for o in customer_queue])
     
@@ -109,23 +117,33 @@ for i in range(sim_days):
         elif inventory > 0:
             daily_fulfilled += inventory
             total_fulfilled_on_time += inventory
-            daily_unfulfilled_new = today_order['qty'] - inventory # Missed portion
+            daily_unfulfilled_new = today_order['qty'] - inventory 
             today_order['qty'] -= inventory
             inventory = 0
             customer_queue.append(today_order)
         else:
-            daily_unfulfilled_new = today_order['qty'] # Entirely missed
+            daily_unfulfilled_new = today_order['qty'] 
             customer_queue.append(today_order)
             
     # --- END OF DAY METRICS & REVIEW ---
     arr_closing_balance[i] = inventory
-    arr_backlog_cf[i] = sum(o['qty'] for o in customer_queue)
     arr_orders_fulfilled[i] = daily_fulfilled
     arr_unfulfilled_demand[i] = daily_unfulfilled_new
     
-    # True Stockout Check
+    # True Stockout Check & Lost Sales Execution
     past_due_orders = [o for o in customer_queue if day > o['due_day']]
     arr_stockout_day[i] = 1 if len(past_due_orders) > 0 else 0
+    
+    daily_lost_sales = 0
+    if cancel_expired and len(past_due_orders) > 0:
+        daily_lost_sales = sum(o['qty'] for o in past_due_orders)
+        # Drop the expired orders from the active queue
+        customer_queue = [o for o in customer_queue if day <= o['due_day']]
+        
+    arr_lost_sales[i] = daily_lost_sales
+    
+    # Record remaining backlog AFTER potential cancellations
+    arr_backlog_cf[i] = sum(o['qty'] for o in customer_queue)
     
     # Pipeline & Inventory Position
     pipeline_qty = sum([o['qty'] for o in pending_supplier_orders])
@@ -153,7 +171,8 @@ df = pd.DataFrame({
     'Opening Backlog Orders': arr_opening_backlog,
     'Demand': demands_array,
     'Orders Fulfilled': arr_orders_fulfilled,
-    'Unfulfilled Orders (Today)': arr_unfulfilled_demand, # NEW COLUMN
+    'Unfulfilled Orders (Today)': arr_unfulfilled_demand,
+    'Lost Sales (Cancelled)': arr_lost_sales, # NEW COLUMN
     'Backlogs to Carry Forward': arr_backlog_cf,
     'Closing Balance': arr_closing_balance,
     'Pipeline Orders': arr_pipeline_orders,
@@ -170,18 +189,25 @@ min_inv = df['Closing Balance'].min()
 max_inv = df['Closing Balance'].max()
 avg_inv = df['Closing Balance'].mean()
 max_backlog = df['Backlogs to Carry Forward'].max()
+total_lost_sales = df['Lost Sales (Cancelled)'].sum()
 fill_rate = (total_fulfilled_on_time / total_demand_generated) * 100 if total_demand_generated > 0 else 100
 
 st.header("📊 Key Performance Indicators")
-col1, col2, col3, col4, col5, col6 = st.columns(6)
 
-col1.metric("Stockout Days", f"{stockout_days} days", 
-            delta=f"{(stockout_days/sim_days)*100:.1f}% of time", delta_color="inverse")
+# Adjusted layout to fit the new Lost Sales metric
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("Stockout Days", f"{stockout_days} days", delta=f"{(stockout_days/sim_days)*100:.1f}% of time", delta_color="inverse")
 col2.metric("Fill Rate (On-Time)", f"{fill_rate:.2f}%")
-col3.metric("Min Inventory", f"{min_inv:,.0f} units")
-col4.metric("Max Inventory", f"{max_inv:,.0f} units")
-col5.metric("Avg Inventory", f"{avg_inv:,.0f} units")
-col6.metric("Max Backlog", f"{max_backlog:,.0f} units", delta="Peak Volume", delta_color="off")
+col3.metric("Max Backlog", f"{max_backlog:,.0f} units")
+col4.metric("Total Lost Sales", f"{total_lost_sales:,.0f} units", delta="Cancelled Demand", delta_color="inverse")
+
+st.markdown("<br>", unsafe_allow_html=True)
+
+col5, col6, col7, col8 = st.columns(4)
+col5.metric("Min Inventory", f"{min_inv:,.0f} units")
+col6.metric("Max Inventory", f"{max_inv:,.0f} units")
+col7.metric("Avg Inventory", f"{avg_inv:,.0f} units")
+col8.metric("Total Demand", f"{total_demand_generated:,.0f} units")
 
 # ==========================================
 # 4. VISUALIZATIONS
@@ -199,7 +225,7 @@ stockout_mask = df['Stockout Day'] == 1
 if stockout_mask.any():
     stockouts = df[stockout_mask]
     fig1.add_scatter(x=stockouts['Day'], y=stockouts['Closing Balance'], 
-                    mode='markers', marker=dict(color='red', size=8), name='Stockout (Past Due)')
+                    mode='markers', marker=dict(color='red', size=8), name='Stockout Event')
                     
 st.plotly_chart(fig1, use_container_width=True)
 
@@ -215,11 +241,16 @@ fig2.add_hline(y=0, line_dash="solid", line_color="black", opacity=0.4)
 st.plotly_chart(fig2, use_container_width=True)
 
 st.markdown("---")
-st.subheader("⚠️ Backlog Accumulation Over Time")
+st.subheader("⚠️ Backlog Accumulation & Lost Sales Over Time")
 
+# Add Lost Sales to the Backlog chart as bars so you can see exactly when cancellations occur
 fig3 = px.area(df, x='Day', y='Backlogs to Carry Forward', 
-               labels={'Backlogs to Carry Forward': 'Backlogged Units (Pending)'},
-               color_discrete_sequence=['#d62728']) 
+               labels={'value': 'Units'},
+               color_discrete_sequence=['#d62728'], name='Active Backlog') 
+
+if df['Lost Sales (Cancelled)'].sum() > 0:
+    fig3.add_bar(x=df['Day'], y=df['Lost Sales (Cancelled)'], 
+                 name='Lost Sales (Cancelled)', marker_color='black', opacity=0.6)
                
 st.plotly_chart(fig3, use_container_width=True)
 
@@ -228,9 +259,8 @@ st.plotly_chart(fig3, use_container_width=True)
 # ==========================================
 st.markdown("---")
 st.subheader("📋 Daily Inventory Ledger")
-st.markdown("Detailed breakdown tracking Opening, Closing, and Pipeline balances.")
+st.markdown("Detailed breakdown tracking Opening, Closing, Pipeline balances, and Policy executions.")
 
-# Updated columns list to include the newly requested metric
 ledger_cols = [
     'Day', 
     'Opening Balance', 
@@ -238,6 +268,7 @@ ledger_cols = [
     'Demand', 
     'Orders Fulfilled', 
     'Unfulfilled Orders (Today)', 
+    'Lost Sales (Cancelled)', 
     'Backlogs to Carry Forward', 
     'Closing Balance', 
     'Pipeline Orders'
