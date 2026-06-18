@@ -14,7 +14,7 @@ This app simulates a continuous review **(Q, R)** inventory system with backlog 
 """)
 
 # ==========================================
-# SIDEBAR: Inputs
+# 1. SIDEBAR: Inputs & Parameters
 # ==========================================
 st.sidebar.header("⚙️ Simulation Parameters")
 
@@ -36,31 +36,44 @@ st.sidebar.subheader("Simulation Length")
 sim_days = st.sidebar.number_input("Days to Simulate", min_value=30, value=365)
 
 # ==========================================
-# SIMULATION ENGINE (Runs automatically)
+# 2. OPTIMIZED SIMULATION ENGINE
 # ==========================================
 
-# Initial State
-inventory = rop + order_qty
-pending_supplier_orders = [] # List of dicts: {'ordered_day': int, 'arrival_day': int, 'qty': int}
-customer_queue = []          # List of dicts: {'order_day': int, 'due_day': int, 'qty': int}
+# Vectorized Upfront Generation of Random Demands
+demands_array = np.maximum(0, np.random.normal(mean_demand, std_demand, sim_days).astype(int))
 
-daily_records = []
-total_demand_generated = 0
+# Pre-allocate NumPy arrays for ledger tracking
+arr_opening_balance = np.zeros(sim_days, dtype=int)
+arr_opening_backlog = np.zeros(sim_days, dtype=int)
+arr_orders_fulfilled = np.zeros(sim_days, dtype=int)
+arr_backlog_cf = np.zeros(sim_days, dtype=int)
+arr_closing_balance = np.zeros(sim_days, dtype=int)
+arr_pipeline_orders = np.zeros(sim_days, dtype=int)
+arr_stockout_day = np.zeros(sim_days, dtype=int)
+arr_inv_position = np.zeros(sim_days, dtype=int)
+
+# Initialize Starting State
+inventory = rop + order_qty
+pending_supplier_orders = [] # [{'ordered_day': int, 'arrival_day': int, 'qty': int}]
+customer_queue = []          # [{'order_day': int, 'due_day': int, 'qty': int}]
+
+total_demand_generated = np.sum(demands_array)
 total_fulfilled_on_time = 0
 
-for day in range(1, sim_days + 1):
+for i in range(sim_days):
+    day = i + 1
     daily_fulfilled = 0
     
-    # 1. EARLY MORNING: Receive incoming shipments from supplier
+    # --- MORNING OPERATIONS ---
     arrived_qty = sum([o['qty'] for o in pending_supplier_orders if o['arrival_day'] == day])
     inventory += arrived_qty
     pending_supplier_orders = [o for o in pending_supplier_orders if o['arrival_day'] > day]
     
-    # Snapshot: Opening Balances
-    opening_balance = inventory
-    opening_backlog = sum([o['qty'] for o in customer_queue])
+    # Record Opening Balances
+    arr_opening_balance[i] = inventory
+    arr_opening_backlog[i] = sum([o['qty'] for o in customer_queue])
     
-    # 2. CLEAR BACKLOG FIRST: Use available inventory to fulfill older orders
+    # --- CLEAR BACKLOG FIRST ---
     new_queue = []
     for order in customer_queue:
         if inventory >= order['qty']:
@@ -80,9 +93,8 @@ for day in range(1, sim_days + 1):
             
     customer_queue = new_queue
     
-    # 3. DAYTIME NEW DEMAND: Generate today's demand and fulfill if inventory remains
-    daily_demand = max(0, int(np.random.normal(mean_demand, std_demand)))
-    total_demand_generated += daily_demand
+    # --- DAYTIME NEW DEMAND ---
+    daily_demand = demands_array[i]
     
     if daily_demand > 0:
         due_day = day + service_time
@@ -101,62 +113,61 @@ for day in range(1, sim_days + 1):
         else:
             customer_queue.append(today_order)
             
-    # 4. END OF DAY METRICS
-    closing_balance = inventory
-    backlog_cf = sum(o['qty'] for o in customer_queue)
+    # --- END OF DAY METRICS & REVIEW ---
+    arr_closing_balance[i] = inventory
+    arr_backlog_cf[i] = sum(o['qty'] for o in customer_queue)
+    arr_orders_fulfilled[i] = daily_fulfilled
     
-    # Check for True Stockouts (orders past their allowed service time)
-    past_due_orders = [o for o in customer_queue if day >= o['due_day']]
-    is_stockout = len(past_due_orders) > 0
+    # True Stockout Check
+    past_due_orders = [o for o in customer_queue if day > o['due_day']]
+    arr_stockout_day[i] = 1 if len(past_due_orders) > 0 else 0
     
-    # 5. EVENING REVIEW & ORDERING (Q, R Policy)
-    # Pipeline orders currently in transit (before placing a new one)
+    # Pipeline & Inventory Position
     pipeline_qty = sum([o['qty'] for o in pending_supplier_orders])
+    inv_position = arr_closing_balance[i] + pipeline_qty - arr_backlog_cf[i]
     
-    # Inventory Position = On Hand + On Order - Total Backlog
-    inv_position = closing_balance + pipeline_qty - backlog_cf
-    
+    # Q, R Ordering Logic
     if inv_position <= rop:
-        # Prevent placing duplicate orders on the exact same day
         already_ordered_today = any(o['ordered_day'] == day for o in pending_supplier_orders)
         if not already_ordered_today:
-            # Lead Time Logic: Placed Day T -> Arrives Day T + LT + 1
             arrival_date = day + supplier_lead_time + 1
             pending_supplier_orders.append({
                 'ordered_day': day, 
                 'arrival_day': arrival_date, 
                 'qty': order_qty
             })
-            # Update pipeline quantity to reflect the order just placed
             pipeline_qty += order_qty
             
-    # 6. Record the day's ledger
-    daily_records.append({
-        'Day': day,
-        'Opening Balance': opening_balance,
-        'Opening Backlog Orders': opening_backlog,
-        'Demand': daily_demand,
-        'Orders Fulfilled': daily_fulfilled,
-        'Backlogs to Carry Forward': backlog_cf,
-        'Closing Balance': closing_balance,
-        'Pipeline Orders': pipeline_qty,
-        'Stockout Day': 1 if is_stockout else 0, # Hidden from ledger table, used for KPIs
-        'Inventory Position': inv_position       # Hidden from ledger table, used for Charts
-    })
-    
-df = pd.DataFrame(daily_records)
+    arr_pipeline_orders[i] = pipeline_qty
+    arr_inv_position[i] = inv_position
+
+# Instantly build DataFrame from pre-allocated arrays
+df = pd.DataFrame({
+    'Day': np.arange(1, sim_days + 1),
+    'Opening Balance': arr_opening_balance,
+    'Opening Backlog Orders': arr_opening_backlog,
+    'Demand': demands_array,
+    'Orders Fulfilled': arr_orders_fulfilled,
+    'Backlogs to Carry Forward': arr_backlog_cf,
+    'Closing Balance': arr_closing_balance,
+    'Pipeline Orders': arr_pipeline_orders,
+    'Stockout Day': arr_stockout_day,
+    'Inventory Position': arr_inv_position,
+    'Net Inventory': arr_closing_balance - arr_backlog_cf  # Requested metric (Can go negative)
+})
 
 # ==========================================
-# OUTPUTS & KPIs
+# 3. OUTPUTS & KPIs
 # ==========================================
 stockout_days = df['Stockout Day'].sum()
 min_inv = df['Closing Balance'].min()
 max_inv = df['Closing Balance'].max()
 avg_inv = df['Closing Balance'].mean()
+max_backlog = df['Backlogs to Carry Forward'].max()
 fill_rate = (total_fulfilled_on_time / total_demand_generated) * 100 if total_demand_generated > 0 else 100
 
 st.header("📊 Key Performance Indicators")
-col1, col2, col3, col4, col5 = st.columns(5)
+col1, col2, col3, col4, col5, col6 = st.columns(6)
 
 col1.metric("Stockout Days", f"{stockout_days} days", 
             delta=f"{(stockout_days/sim_days)*100:.1f}% of time", delta_color="inverse")
@@ -164,35 +175,57 @@ col2.metric("Fill Rate (On-Time)", f"{fill_rate:.2f}%")
 col3.metric("Min Inventory", f"{min_inv:,.0f} units")
 col4.metric("Max Inventory", f"{max_inv:,.0f} units")
 col5.metric("Avg Inventory", f"{avg_inv:,.0f} units")
+col6.metric("Max Backlog", f"{max_backlog:,.0f} units", delta="Peak Volume", delta_color="off")
 
 # ==========================================
-# VISUALIZATIONS
+# 4. VISUALIZATIONS
 # ==========================================
 st.markdown("---")
 st.subheader("📈 Inventory Level Over Time")
 
-fig = px.line(df, x='Day', y=['Closing Balance', 'Inventory Position'], 
+fig1 = px.line(df, x='Day', y=['Closing Balance', 'Inventory Position'], 
               labels={'value': 'Units', 'variable': 'Metric'},
               color_discrete_map={'Closing Balance': '#1f77b4', 'Inventory Position': '#ff7f0e'})
 
-fig.add_hline(y=rop, line_dash="dash", line_color="red", annotation_text="Reorder Point (ROP)")
+fig1.add_hline(y=rop, line_dash="dash", line_color="red", annotation_text="Reorder Point (ROP)")
 
 stockout_mask = df['Stockout Day'] == 1
 if stockout_mask.any():
     stockouts = df[stockout_mask]
-    fig.add_scatter(x=stockouts['Day'], y=stockouts['Closing Balance'], 
+    fig1.add_scatter(x=stockouts['Day'], y=stockouts['Closing Balance'], 
                     mode='markers', marker=dict(color='red', size=8), name='Stockout (Past Due)')
                     
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(fig1, use_container_width=True)
+
+st.markdown("---")
+st.subheader("📉 Net Inventory Over Time (Closing Inventory - Backlog)")
+st.markdown("Positive values reflect available shelf stock. Negative values show explicit unfulfilled order deficits.")
+
+# New Line Chart for Net Inventory (Allows Negative values)
+fig2 = px.line(df, x='Day', y='Net Inventory', 
+              labels={'Net Inventory': 'Net Units'},
+              color_discrete_sequence=['#9467bd']) # Distinct Purple Color
+
+# Add a flat baseline at 0 for visual clarity
+fig2.add_hline(y=0, line_dash="solid", line_color="black", opacity=0.4)
+st.plotly_chart(fig2, use_container_width=True)
+
+st.markdown("---")
+st.subheader("⚠️ Backlog Accumulation Over Time")
+
+fig3 = px.area(df, x='Day', y='Backlogs to Carry Forward', 
+               labels={'Backlogs to Carry Forward': 'Backlogged Units (Pending)'},
+               color_discrete_sequence=['#d62728']) 
+               
+st.plotly_chart(fig3, use_container_width=True)
 
 # ==========================================
-# DAILY LEDGER TABLE
+# 5. DAILY LEDGER TABLE
 # ==========================================
 st.markdown("---")
 st.subheader("📋 Daily Inventory Ledger")
-st.markdown("Detailed breakdown of operations tracking Opening, Closing, and Pipeline balances.")
+st.markdown("Detailed breakdown tracking Opening, Closing, and Pipeline balances.")
 
-# Filter columns explicitly to match your request
 ledger_cols = [
     'Day', 
     'Opening Balance', 
