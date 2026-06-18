@@ -55,7 +55,7 @@ arr_opening_balance = np.zeros(sim_days, dtype=int)
 arr_opening_backlog = np.zeros(sim_days, dtype=int)
 arr_orders_fulfilled = np.zeros(sim_days, dtype=int)
 arr_unfulfilled_demand = np.zeros(sim_days, dtype=int)
-arr_lost_sales = np.zeros(sim_days, dtype=int) # NEW: Tracks cancelled orders
+arr_lost_sales = np.zeros(sim_days, dtype=int) 
 arr_backlog_cf = np.zeros(sim_days, dtype=int)
 arr_closing_balance = np.zeros(sim_days, dtype=int)
 arr_pipeline_orders = np.zeros(sim_days, dtype=int)
@@ -172,7 +172,7 @@ df = pd.DataFrame({
     'Demand': demands_array,
     'Orders Fulfilled': arr_orders_fulfilled,
     'Unfulfilled Orders (Today)': arr_unfulfilled_demand,
-    'Lost Sales (Cancelled)': arr_lost_sales, # NEW COLUMN
+    'Lost Sales (Cancelled)': arr_lost_sales, 
     'Backlogs to Carry Forward': arr_backlog_cf,
     'Closing Balance': arr_closing_balance,
     'Pipeline Orders': arr_pipeline_orders,
@@ -194,7 +194,6 @@ fill_rate = (total_fulfilled_on_time / total_demand_generated) * 100 if total_de
 
 st.header("📊 Key Performance Indicators")
 
-# Adjusted layout to fit the new Lost Sales metric
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("Stockout Days", f"{stockout_days} days", delta=f"{(stockout_days/sim_days)*100:.1f}% of time", delta_color="inverse")
 col2.metric("Fill Rate (On-Time)", f"{fill_rate:.2f}%")
@@ -243,10 +242,12 @@ st.plotly_chart(fig2, use_container_width=True)
 st.markdown("---")
 st.subheader("⚠️ Backlog Accumulation & Lost Sales Over Time")
 
-# Add Lost Sales to the Backlog chart as bars so you can see exactly when cancellations occur
 fig3 = px.area(df, x='Day', y='Backlogs to Carry Forward', 
-               labels={'value': 'Units'},
-               color_discrete_sequence=['#d62728'], name='Active Backlog') 
+               labels={'Backlogs to Carry Forward': 'Units'},
+               color_discrete_sequence=['#d62728']) 
+
+# Safely rename the area trace for the legend
+fig3.update_traces(name='Active Backlog', showlegend=True)
 
 if df['Lost Sales (Cancelled)'].sum() > 0:
     fig3.add_bar(x=df['Day'], y=df['Lost Sales (Cancelled)'], 
