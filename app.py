@@ -10,7 +10,7 @@ st.markdown("""
 This app simulates a continuous review **(Q, R)** inventory system with backlog allowances.
 * **Morning:** Incoming shipments arrive. Existing backlogs are cleared first.
 * **Daytime:** New demand occurs and is filled. Unfilled demand moves to the backlog.
-* **Evening:** Depending on your policy, expired backlogs are either carried forward or cancelled as Lost Sales. Inventory position is evaluated for reordering.
+* **Evening:** Depending on your policy, expired backlogs are either carried forward or cancelled as Lost Sales. 
 """)
 
 # ==========================================
@@ -47,10 +47,9 @@ sim_days = st.sidebar.number_input("Days to Simulate", min_value=30, value=365)
 # 2. OPTIMIZED SIMULATION ENGINE
 # ==========================================
 
-# Vectorized Upfront Generation of Random Demands
 demands_array = np.maximum(0, np.random.normal(mean_demand, std_demand, sim_days).astype(int))
 
-# Pre-allocate NumPy arrays for ledger tracking
+# Pre-allocate arrays for standard daily ledger
 arr_opening_balance = np.zeros(sim_days, dtype=int)
 arr_opening_backlog = np.zeros(sim_days, dtype=int)
 arr_orders_fulfilled = np.zeros(sim_days, dtype=int)
@@ -61,6 +60,11 @@ arr_closing_balance = np.zeros(sim_days, dtype=int)
 arr_pipeline_orders = np.zeros(sim_days, dtype=int)
 arr_stockout_day = np.zeros(sim_days, dtype=int)
 arr_inv_position = np.zeros(sim_days, dtype=int)
+
+# NEW: Pre-allocate arrays for Cohort Lifecycle Tracking
+# arr_cohort_fills tracks how many days it took to fill an order [demand_day, days_delayed]
+arr_cohort_fills = np.zeros((sim_days, sim_days), dtype=int) 
+arr_cohort_lost = np.zeros(sim_days, dtype=int)
 
 # Initialize Starting State
 inventory = rop + order_qty
@@ -86,12 +90,17 @@ for i in range(sim_days):
     # --- CLEAR BACKLOG FIRST ---
     new_queue = []
     for order in customer_queue:
+        order_idx = order['order_day'] - 1
+        days_late = day - order['order_day']
+        
         if inventory >= order['qty']:
+            arr_cohort_fills[order_idx, days_late] += order['qty'] # Log cohort fulfillment
             inventory -= order['qty']
             daily_fulfilled += order['qty']
             if day <= order['due_day']:
                 total_fulfilled_on_time += order['qty']
         elif inventory > 0:
+            arr_cohort_fills[order_idx, days_late] += inventory # Log partial cohort fulfillment
             daily_fulfilled += inventory
             if day <= order['due_day']:
                 total_fulfilled_on_time += inventory
@@ -105,16 +114,19 @@ for i in range(sim_days):
     
     # --- DAYTIME NEW DEMAND ---
     daily_demand = demands_array[i]
+    today_idx = day - 1
     
     if daily_demand > 0:
         due_day = day + service_time
         today_order = {'order_day': day, 'due_day': due_day, 'qty': daily_demand}
         
         if inventory >= today_order['qty']:
+            arr_cohort_fills[today_idx, 0] += today_order['qty'] # Filled same day
             inventory -= today_order['qty']
             daily_fulfilled += today_order['qty']
             total_fulfilled_on_time += today_order['qty']
         elif inventory > 0:
+            arr_cohort_fills[today_idx, 0] += inventory # Partially filled same day
             daily_fulfilled += inventory
             total_fulfilled_on_time += inventory
             daily_unfulfilled_new = today_order['qty'] - inventory 
@@ -130,15 +142,19 @@ for i in range(sim_days):
     arr_orders_fulfilled[i] = daily_fulfilled
     arr_unfulfilled_demand[i] = daily_unfulfilled_new
     
-    # --- CORRECTED STOCKOUT LOGIC ---
-    # An order is now flagged as a stockout if it is still in the queue on the evening of its due date
+    # True Stockout Check & Lost Sales Execution
     past_due_orders = [o for o in customer_queue if day >= o['due_day']]
     arr_stockout_day[i] = 1 if len(past_due_orders) > 0 else 0
     
     daily_lost_sales = 0
     if cancel_expired and len(past_due_orders) > 0:
         daily_lost_sales = sum(o['qty'] for o in past_due_orders)
-        # Drop the expired orders (keep only those whose due date is STRICTLY greater than today)
+        
+        # Record lost sales in the cohort tracker
+        for o in past_due_orders:
+            arr_cohort_lost[o['order_day'] - 1] += o['qty']
+            
+        # Drop the expired orders from the active queue
         customer_queue = [o for o in customer_queue if day < o['due_day']]
         
     arr_lost_sales[i] = daily_lost_sales
@@ -165,7 +181,11 @@ for i in range(sim_days):
     arr_pipeline_orders[i] = pipeline_qty
     arr_inv_position[i] = inv_position
 
-# Instantly build DataFrame from pre-allocated arrays
+# ==========================================
+# 3. BUILD DATAFRAMES
+# ==========================================
+
+# 1. Standard Ledger DataFrame
 df = pd.DataFrame({
     'Day': np.arange(1, sim_days + 1),
     'Opening Balance': arr_opening_balance,
@@ -182,8 +202,30 @@ df = pd.DataFrame({
     'Net Inventory': arr_closing_balance - arr_backlog_cf
 })
 
+# 2. Cohort Analysis DataFrame
+# Find the maximum delay actually recorded to keep the table clean
+col_sums = np.sum(arr_cohort_fills, axis=0)
+max_delay_idx = np.max(np.nonzero(col_sums)) if np.any(col_sums) else 0
+
+cohort_df = pd.DataFrame({
+    'Demand Day': np.arange(1, sim_days + 1),
+    'Total Demand': demands_array,
+})
+
+for d in range(max_delay_idx + 1):
+    col_name = 'Filled (Same Day)' if d == 0 else f'Filled (+{d} Days)'
+    cohort_df[col_name] = arr_cohort_fills[:, d]
+
+cohort_df['Unsold (Lost)'] = arr_cohort_lost
+
+# Calculate any demand still sitting in the queue at the end of the simulation
+arr_cohort_pending = np.zeros(sim_days, dtype=int)
+for order in customer_queue:
+    arr_cohort_pending[order['order_day'] - 1] += order['qty']
+cohort_df['Pending (In Queue)'] = arr_cohort_pending
+
 # ==========================================
-# 3. OUTPUTS & KPIs
+# 4. OUTPUTS & KPIs
 # ==========================================
 stockout_days = df['Stockout Day'].sum()
 min_inv = df['Closing Balance'].min()
@@ -210,7 +252,7 @@ col7.metric("Avg Inventory", f"{avg_inv:,.0f} units")
 col8.metric("Total Demand", f"{total_demand_generated:,.0f} units")
 
 # ==========================================
-# 4. VISUALIZATIONS
+# 5. VISUALIZATIONS
 # ==========================================
 st.markdown("---")
 st.subheader("📈 Inventory Level Over Time")
@@ -256,11 +298,17 @@ if df['Lost Sales (Cancelled)'].sum() > 0:
 st.plotly_chart(fig3, use_container_width=True)
 
 # ==========================================
-# 5. DAILY LEDGER TABLE
+# 6. DATA TABLES
 # ==========================================
 st.markdown("---")
-st.subheader("📋 Daily Inventory Ledger")
-st.markdown("Detailed breakdown tracking Opening, Closing, Pipeline balances, and Policy executions.")
+st.subheader("📊 Order Fulfillment Cohort Analysis")
+st.markdown("Tracks the lifecycle of each day's demand. Read horizontally to see exactly when the demand generated on a specific day was finally shipped to the customer (or if it was lost).")
+
+st.dataframe(cohort_df, use_container_width=True, hide_index=True)
+
+st.markdown("---")
+st.subheader("📋 Daily Warehouse Ledger")
+st.markdown("Detailed breakdown of daily operations, inventory balances, and order pipelines.")
 
 ledger_cols = [
     'Day', 
