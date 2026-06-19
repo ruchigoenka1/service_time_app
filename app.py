@@ -349,7 +349,7 @@ fig3.update_traces(name='Active Backlog', showlegend=True)
 
 if df['Lost Sales (Cancelled)'].sum() > 0:
     fig3.add_bar(x=df['Day'], y=df['Lost Sales (Cancelled)'], 
-                 name='Lost Sales (Cancelled)', marker_color='black', opacity=0.6)
+                 name='Lost Sales (Cancelled)', marker_color='#ffaa00', opacity=0.9)
                
 st.plotly_chart(fig3, use_container_width=True)
 
