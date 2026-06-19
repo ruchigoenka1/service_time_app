@@ -18,10 +18,7 @@ This app simulates a continuous review **(Q, R)** inventory system with backlog 
 # ==========================================
 st.sidebar.header("⚙️ Simulation Controls")
 
-# NEW: Button to trigger a rerun with a new random demand generation
 if st.sidebar.button("🔄 Generate New Demand", type="primary", use_container_width=True):
-    # Streamlit scripts run top-to-bottom on interaction. 
-    # Pressing this button inherently triggers a fresh run with new random numbers.
     pass
 
 st.sidebar.markdown("---")
@@ -44,8 +41,37 @@ backlog_policy = st.sidebar.radio(
 )
 cancel_expired = (backlog_policy == "Cancel Order (Lost Sale)")
 
-st.sidebar.subheader("Inventory Policy")
-rop = st.sidebar.number_input("Reorder Point (ROP)", min_value=0, value=800)
+# --- NEW: PRESCRIPTIVE ROP GUIDANCE ---
+st.sidebar.subheader("Inventory Policy & Guidance")
+
+# 1. Map Service Level to Statistical Z-Scores
+service_levels = {
+    "90.0%": 1.28,
+    "95.0%": 1.645,
+    "98.0%": 2.05,
+    "99.0%": 2.33,
+    "99.9%": 3.09
+}
+sl_choice = st.sidebar.selectbox("Target Service Level", options=list(service_levels.keys()), index=1)
+z_score = service_levels[sl_choice]
+
+# 2. Calculate Effective Lead Time Risk
+# If Supplier takes 14 days, but Service Time is 2 days, your true exposure is 12 days.
+eff_lt = max(0, supplier_lead_time - service_time)
+
+# 3. Calculate Recommended ROP
+if eff_lt > 0:
+    mu_L = mean_demand * eff_lt
+    sigma_L = std_demand * np.sqrt(eff_lt)
+    recommended_rop = int(round(mu_L + (z_score * sigma_L)))
+else:
+    # If Service Time >= Lead Time, you have no risk!
+    recommended_rop = 0 
+
+st.sidebar.info(f"💡 **Suggested ROP: {recommended_rop} units**\n\n*(Calculated for an effective risk window of {eff_lt} days to achieve {sl_choice} service).*")
+
+# The default value dynamically locks to the recommendation for ease of use
+rop = st.sidebar.number_input("Reorder Point (ROP)", min_value=0, value=recommended_rop)
 order_qty = st.sidebar.number_input("Order Quantity (Q)", min_value=1, value=1000)
 
 st.sidebar.subheader("Simulation Length")
@@ -57,7 +83,6 @@ sim_days = st.sidebar.number_input("Days to Simulate", min_value=30, value=365)
 
 demands_array = np.maximum(0, np.random.normal(mean_demand, std_demand, sim_days).astype(int))
 
-# Pre-allocate arrays for standard daily ledger
 arr_opening_balance = np.zeros(sim_days, dtype=int)
 arr_opening_backlog = np.zeros(sim_days, dtype=int)
 arr_orders_fulfilled = np.zeros(sim_days, dtype=int)
@@ -69,11 +94,9 @@ arr_pipeline_orders = np.zeros(sim_days, dtype=int)
 arr_stockout_day = np.zeros(sim_days, dtype=int)
 arr_inv_position = np.zeros(sim_days, dtype=int)
 
-# Pre-allocate arrays for Cohort Lifecycle Tracking
 arr_cohort_fills = np.zeros((sim_days, sim_days), dtype=int) 
 arr_cohort_lost = np.zeros(sim_days, dtype=int)
 
-# Initialize Starting State
 inventory = rop + order_qty
 pending_supplier_orders = [] 
 customer_queue = []          
@@ -149,7 +172,6 @@ for i in range(sim_days):
     arr_orders_fulfilled[i] = daily_fulfilled
     arr_unfulfilled_demand[i] = daily_unfulfilled_new
     
-    # True Stockout Check & Lost Sales Execution
     past_due_orders = [o for o in customer_queue if day >= o['due_day']]
     arr_stockout_day[i] = 1 if len(past_due_orders) > 0 else 0
     
@@ -164,14 +186,11 @@ for i in range(sim_days):
         
     arr_lost_sales[i] = daily_lost_sales
     
-    # Record remaining backlog AFTER potential cancellations
     arr_backlog_cf[i] = sum(o['qty'] for o in customer_queue)
     
-    # Pipeline & Inventory Position
     pipeline_qty = sum([o['qty'] for o in pending_supplier_orders])
     inv_position = arr_closing_balance[i] + pipeline_qty - arr_backlog_cf[i]
     
-    # Q, R Ordering Logic
     if inv_position <= rop:
         already_ordered_today = any(o['ordered_day'] == day for o in pending_supplier_orders)
         if not already_ordered_today:
@@ -190,7 +209,6 @@ for i in range(sim_days):
 # 3. BUILD DATAFRAMES
 # ==========================================
 
-# 1. Standard Ledger DataFrame
 df = pd.DataFrame({
     'Day': np.arange(1, sim_days + 1),
     'Opening Balance': arr_opening_balance,
@@ -207,7 +225,6 @@ df = pd.DataFrame({
     'Net Inventory': arr_closing_balance - arr_backlog_cf
 })
 
-# 2. Cohort Analysis DataFrame
 col_sums = np.sum(arr_cohort_fills, axis=0)
 max_delay_idx = np.max(np.nonzero(col_sums)) if np.any(col_sums) else 0
 
@@ -227,7 +244,6 @@ for order in customer_queue:
     arr_cohort_pending[order['order_day'] - 1] += order['qty']
 cohort_df['Pending (In Queue)'] = arr_cohort_pending
 
-# 3. Fulfillment Summary Table (OTIF)
 summary_data = []
 for d in range(max_delay_idx + 1):
     label = "Same Day" if d == 0 else f"+{d} Days"
@@ -274,10 +290,7 @@ col1, col2, col3, col4 = st.columns(4)
 col1.metric("Stockout Days", f"{stockout_days} days", delta=f"{(stockout_days/sim_days)*100:.1f}% of time", delta_color="inverse")
 col2.metric("Fill Rate (On-Time)", f"{fill_rate:.2f}%")
 col3.metric("Max Backlog", f"{max_backlog:,.0f} units")
-
-# NEW: Lost Sales metric dynamically shows % of total demand as the delta
-col4.metric("Total Lost Sales", f"{total_lost_sales:,.0f} units", 
-            delta=f"{lost_pct:.2f}% of Total Demand", delta_color="inverse")
+col4.metric("Total Lost Sales", f"{total_lost_sales:,.0f} units", delta=f"{lost_pct:.2f}% of Total Demand", delta_color="inverse")
 
 st.markdown("<br>", unsafe_allow_html=True)
 
@@ -294,7 +307,6 @@ st.markdown("---")
 st.subheader("⏱️ On-Time In-Full (OTIF) Breakdown")
 st.markdown("Tracking exactly what percentage of total demand was fulfilled relative to the allowed Service Time.")
 
-# Render OTIF columns only up to the configured Service Time to keep it clean
 otif_cols = st.columns(service_time + 1)
 for d in range(service_time + 1):
     if d <= max_delay_idx:
