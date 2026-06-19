@@ -16,7 +16,15 @@ This app simulates a continuous review **(Q, R)** inventory system with backlog 
 # ==========================================
 # 1. SIDEBAR: Inputs & Parameters
 # ==========================================
-st.sidebar.header("⚙️ Simulation Parameters")
+st.sidebar.header("⚙️ Simulation Controls")
+
+# NEW: Button to trigger a rerun with a new random demand generation
+if st.sidebar.button("🔄 Generate New Demand", type="primary", use_container_width=True):
+    # Streamlit scripts run top-to-bottom on interaction. 
+    # Pressing this button inherently triggers a fresh run with new random numbers.
+    pass
+
+st.sidebar.markdown("---")
 
 st.sidebar.subheader("Demand Profile")
 mean_demand = st.sidebar.number_input("Average Daily Demand", min_value=1, value=50)
@@ -61,8 +69,7 @@ arr_pipeline_orders = np.zeros(sim_days, dtype=int)
 arr_stockout_day = np.zeros(sim_days, dtype=int)
 arr_inv_position = np.zeros(sim_days, dtype=int)
 
-# NEW: Pre-allocate arrays for Cohort Lifecycle Tracking
-# arr_cohort_fills tracks how many days it took to fill an order [demand_day, days_delayed]
+# Pre-allocate arrays for Cohort Lifecycle Tracking
 arr_cohort_fills = np.zeros((sim_days, sim_days), dtype=int) 
 arr_cohort_lost = np.zeros(sim_days, dtype=int)
 
@@ -94,13 +101,13 @@ for i in range(sim_days):
         days_late = day - order['order_day']
         
         if inventory >= order['qty']:
-            arr_cohort_fills[order_idx, days_late] += order['qty'] # Log cohort fulfillment
+            arr_cohort_fills[order_idx, days_late] += order['qty'] 
             inventory -= order['qty']
             daily_fulfilled += order['qty']
             if day <= order['due_day']:
                 total_fulfilled_on_time += order['qty']
         elif inventory > 0:
-            arr_cohort_fills[order_idx, days_late] += inventory # Log partial cohort fulfillment
+            arr_cohort_fills[order_idx, days_late] += inventory 
             daily_fulfilled += inventory
             if day <= order['due_day']:
                 total_fulfilled_on_time += inventory
@@ -121,12 +128,12 @@ for i in range(sim_days):
         today_order = {'order_day': day, 'due_day': due_day, 'qty': daily_demand}
         
         if inventory >= today_order['qty']:
-            arr_cohort_fills[today_idx, 0] += today_order['qty'] # Filled same day
+            arr_cohort_fills[today_idx, 0] += today_order['qty'] 
             inventory -= today_order['qty']
             daily_fulfilled += today_order['qty']
             total_fulfilled_on_time += today_order['qty']
         elif inventory > 0:
-            arr_cohort_fills[today_idx, 0] += inventory # Partially filled same day
+            arr_cohort_fills[today_idx, 0] += inventory 
             daily_fulfilled += inventory
             total_fulfilled_on_time += inventory
             daily_unfulfilled_new = today_order['qty'] - inventory 
@@ -150,11 +157,9 @@ for i in range(sim_days):
     if cancel_expired and len(past_due_orders) > 0:
         daily_lost_sales = sum(o['qty'] for o in past_due_orders)
         
-        # Record lost sales in the cohort tracker
         for o in past_due_orders:
             arr_cohort_lost[o['order_day'] - 1] += o['qty']
             
-        # Drop the expired orders from the active queue
         customer_queue = [o for o in customer_queue if day < o['due_day']]
         
     arr_lost_sales[i] = daily_lost_sales
@@ -203,7 +208,6 @@ df = pd.DataFrame({
 })
 
 # 2. Cohort Analysis DataFrame
-# Find the maximum delay actually recorded to keep the table clean
 col_sums = np.sum(arr_cohort_fills, axis=0)
 max_delay_idx = np.max(np.nonzero(col_sums)) if np.any(col_sums) else 0
 
@@ -218,11 +222,41 @@ for d in range(max_delay_idx + 1):
 
 cohort_df['Unsold (Lost)'] = arr_cohort_lost
 
-# Calculate any demand still sitting in the queue at the end of the simulation
 arr_cohort_pending = np.zeros(sim_days, dtype=int)
 for order in customer_queue:
     arr_cohort_pending[order['order_day'] - 1] += order['qty']
 cohort_df['Pending (In Queue)'] = arr_cohort_pending
+
+# 3. Fulfillment Summary Table (OTIF)
+summary_data = []
+for d in range(max_delay_idx + 1):
+    label = "Same Day" if d == 0 else f"+{d} Days"
+    qty = col_sums[d]
+    pct = (qty / total_demand_generated) * 100 if total_demand_generated > 0 else 0
+    summary_data.append({
+        "Fulfillment Time": label, 
+        "Total Units": qty, 
+        "% of Total Demand": f"{pct:.2f}%"
+    })
+
+total_lost_sales = df['Lost Sales (Cancelled)'].sum()
+lost_pct = (total_lost_sales / total_demand_generated) * 100 if total_demand_generated > 0 else 0
+summary_data.append({
+    "Fulfillment Time": "Unsold (Lost)", 
+    "Total Units": total_lost_sales, 
+    "% of Total Demand": f"{lost_pct:.2f}%"
+})
+
+total_pending = np.sum(arr_cohort_pending)
+pending_pct = (total_pending / total_demand_generated) * 100 if total_demand_generated > 0 else 0
+summary_data.append({
+    "Fulfillment Time": "Pending (In Queue)", 
+    "Total Units": total_pending, 
+    "% of Total Demand": f"{pending_pct:.2f}%"
+})
+
+summary_df = pd.DataFrame(summary_data)
+
 
 # ==========================================
 # 4. OUTPUTS & KPIs
@@ -232,7 +266,6 @@ min_inv = df['Closing Balance'].min()
 max_inv = df['Closing Balance'].max()
 avg_inv = df['Closing Balance'].mean()
 max_backlog = df['Backlogs to Carry Forward'].max()
-total_lost_sales = df['Lost Sales (Cancelled)'].sum()
 fill_rate = (total_fulfilled_on_time / total_demand_generated) * 100 if total_demand_generated > 0 else 100
 
 st.header("📊 Key Performance Indicators")
@@ -241,7 +274,10 @@ col1, col2, col3, col4 = st.columns(4)
 col1.metric("Stockout Days", f"{stockout_days} days", delta=f"{(stockout_days/sim_days)*100:.1f}% of time", delta_color="inverse")
 col2.metric("Fill Rate (On-Time)", f"{fill_rate:.2f}%")
 col3.metric("Max Backlog", f"{max_backlog:,.0f} units")
-col4.metric("Total Lost Sales", f"{total_lost_sales:,.0f} units", delta="Cancelled Demand", delta_color="inverse")
+
+# NEW: Lost Sales metric dynamically shows % of total demand as the delta
+col4.metric("Total Lost Sales", f"{total_lost_sales:,.0f} units", 
+            delta=f"{lost_pct:.2f}% of Total Demand", delta_color="inverse")
 
 st.markdown("<br>", unsafe_allow_html=True)
 
@@ -252,7 +288,27 @@ col7.metric("Avg Inventory", f"{avg_inv:,.0f} units")
 col8.metric("Total Demand", f"{total_demand_generated:,.0f} units")
 
 # ==========================================
-# 5. VISUALIZATIONS
+# 5. OTIF BREAKDOWN KPIs
+# ==========================================
+st.markdown("---")
+st.subheader("⏱️ On-Time In-Full (OTIF) Breakdown")
+st.markdown("Tracking exactly what percentage of total demand was fulfilled relative to the allowed Service Time.")
+
+# Render OTIF columns only up to the configured Service Time to keep it clean
+otif_cols = st.columns(service_time + 1)
+for d in range(service_time + 1):
+    if d <= max_delay_idx:
+        qty = col_sums[d]
+        pct = (qty / total_demand_generated) * 100 if total_demand_generated > 0 else 0
+    else:
+        qty, pct = 0, 0
+        
+    label = "OTIF (Same Day)" if d == 0 else f"OTIF (+{d} Days)"
+    otif_cols[d].metric(label, f"{pct:.2f}%", f"{qty:,.0f} units", delta_color="off")
+
+
+# ==========================================
+# 6. VISUALIZATIONS
 # ==========================================
 st.markdown("---")
 st.subheader("📈 Inventory Level Over Time")
@@ -298,12 +354,16 @@ if df['Lost Sales (Cancelled)'].sum() > 0:
 st.plotly_chart(fig3, use_container_width=True)
 
 # ==========================================
-# 6. DATA TABLES
+# 7. DATA TABLES
 # ==========================================
 st.markdown("---")
-st.subheader("📊 Order Fulfillment Cohort Analysis")
-st.markdown("Tracks the lifecycle of each day's demand. Read horizontally to see exactly when the demand generated on a specific day was finally shipped to the customer (or if it was lost).")
+st.subheader("📊 Fulfillment Summary")
+st.markdown("A high-level summary of exactly how long it took to fulfill the generated demand.")
+st.dataframe(summary_df, use_container_width=True, hide_index=True)
 
+st.markdown("---")
+st.subheader("🔍 Order Fulfillment Cohort Analysis (Detailed)")
+st.markdown("Read horizontally to see exactly when the demand generated on a specific day was finally shipped to the customer (or if it was lost).")
 st.dataframe(cohort_df, use_container_width=True, hide_index=True)
 
 st.markdown("---")
