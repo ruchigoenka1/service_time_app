@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
+import scipy.stats as stats  # NEW: Added for dynamic Z-score calculations
 
 st.set_page_config(page_title="Inventory Flexibility Simulator", layout="wide")
 
@@ -41,36 +42,28 @@ backlog_policy = st.sidebar.radio(
 )
 cancel_expired = (backlog_policy == "Cancel Order (Lost Sale)")
 
-# --- NEW: PRESCRIPTIVE ROP GUIDANCE ---
+# --- UPDATED: PRESCRIPTIVE ROP GUIDANCE WITH SLIDER ---
 st.sidebar.subheader("Inventory Policy & Guidance")
 
-# 1. Map Service Level to Statistical Z-Scores
-service_levels = {
-    "90.0%": 1.28,
-    "95.0%": 1.645,
-    "98.0%": 2.05,
-    "99.0%": 2.33,
-    "99.9%": 3.09
-}
-sl_choice = st.sidebar.selectbox("Target Service Level", options=list(service_levels.keys()), index=1)
-z_score = service_levels[sl_choice]
+# 1. Dynamic Slider for Service Level (1% least count)
+sl_choice = st.sidebar.slider("Target Service Level (%)", min_value=50, max_value=99, value=95, step=1)
 
-# 2. Calculate Effective Lead Time Risk
-# If Supplier takes 14 days, but Service Time is 2 days, your true exposure is 12 days.
+# 2. Dynamically calculate Z-Score using SciPy
+z_score = stats.norm.ppf(sl_choice / 100.0)
+
+# 3. Calculate Effective Lead Time Risk
 eff_lt = max(0, supplier_lead_time - service_time)
 
-# 3. Calculate Recommended ROP
+# 4. Calculate Recommended ROP
 if eff_lt > 0:
     mu_L = mean_demand * eff_lt
     sigma_L = std_demand * np.sqrt(eff_lt)
     recommended_rop = int(round(mu_L + (z_score * sigma_L)))
 else:
-    # If Service Time >= Lead Time, you have no risk!
     recommended_rop = 0 
 
-st.sidebar.info(f"💡 **Suggested ROP: {recommended_rop} units**\n\n*(Calculated for an effective risk window of {eff_lt} days to achieve {sl_choice} service).*")
+st.sidebar.info(f"💡 **Suggested ROP: {recommended_rop} units**\n\n*(Calculated with a Z-Score of {z_score:.2f} for an effective risk window of {eff_lt} days).*")
 
-# The default value dynamically locks to the recommendation for ease of use
 rop = st.sidebar.number_input("Reorder Point (ROP)", min_value=0, value=recommended_rop)
 order_qty = st.sidebar.number_input("Order Quantity (Q)", min_value=1, value=1000)
 
@@ -272,7 +265,6 @@ summary_data.append({
 })
 
 summary_df = pd.DataFrame(summary_data)
-
 
 # ==========================================
 # 4. OUTPUTS & KPIs
